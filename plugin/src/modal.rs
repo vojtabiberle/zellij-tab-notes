@@ -41,6 +41,10 @@ const MINIMIZED: Geometry = Geometry {
 pub struct Modal {
     config: Result<Config, String>,
     session: Option<String>,
+    /// Stable ownership discovered from this pane's position in `PaneManifest`.
+    /// Once assigned, a modal must never follow whichever other tab becomes active.
+    tab_id: Option<usize>,
+    tabs: Vec<TabInfo>,
     tab: Option<String>,
     content: Option<String>,
     status: Option<String>,
@@ -53,6 +57,9 @@ pub struct Modal {
     /// The tiled pane to hand focus back to, and the tab it lives in.
     tab_position: Option<usize>,
     terminal_pane: Option<u32>,
+    /// A second `LaunchPlugin` in this tab focuses the incumbent and closes itself.
+    /// Ignore further events once that hand-off has started.
+    closing_duplicate: bool,
 }
 
 impl Modal {
@@ -60,6 +67,8 @@ impl Modal {
         Self {
             config,
             session: None,
+            tab_id: None,
+            tabs: Vec::new(),
             tab: None,
             content: None,
             status: None,
@@ -70,6 +79,7 @@ impl Modal {
             focused: false,
             tab_position: None,
             terminal_pane: None,
+            closing_duplicate: false,
         }
     }
 
@@ -86,6 +96,9 @@ impl Modal {
     }
 
     pub fn update(&mut self, event: Event) -> bool {
+        if self.closing_duplicate {
+            return false;
+        }
         let Ok(config) = self.config.clone() else {
             return false;
         };
@@ -108,24 +121,8 @@ impl Modal {
                 true
             }
             Event::TabUpdate(tabs) => {
-                let Some(active) = tabs.iter().find(|tab| tab.active) else {
-                    return false;
-                };
-                self.tab_position = Some(active.position);
-                let clean = strip_icon(&active.name, &config.icon).to_string();
-                if self.tab.as_deref() != Some(clean.as_str()) {
-                    self.tab = Some(clean);
-                    self.scroll = 0;
-                    // Note-scoped state must not survive a change of which note is
-                    // shown. `content` included: while the new read is in flight it
-                    // would otherwise answer `has_note()` about the previous tab's
-                    // note while `delete_note()` already targets the new one.
-                    self.confirming_delete = false;
-                    self.status = None;
-                    self.content = None;
-                    self.read_note();
-                }
-                true
+                self.tabs = tabs;
+                self.sync_owned_tab(&config)
             }
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 match fs_ops::op_of(&context) {
@@ -186,14 +183,51 @@ impl Modal {
             // back visibly the wrong size.
             Event::PaneUpdate(manifest) => {
                 let me = get_plugin_ids().plugin_id;
-                let Some(pane) = manifest
-                    .panes
-                    .values()
-                    .flatten()
-                    .find(|pane| pane.is_plugin && pane.id == me)
+                let Some((pane_tab_position, pane)) =
+                    manifest.panes.iter().find_map(|(position, panes)| {
+                        panes
+                            .iter()
+                            .find(|pane| pane.is_plugin && pane.id == me)
+                            .map(|pane| (*position, pane))
+                    })
                 else {
                     return false;
                 };
+
+                // `LaunchPlugin` deliberately creates a new instance. If this tab
+                // already has the same floating modal, hand focus to the older pane
+                // and discard only this transient duplicate. The watcher is suppressed
+                // and has a different alias, so it can never be selected here.
+                if let Some(plugin_url) = pane.plugin_url.as_ref() {
+                    let incumbent = manifest
+                        .panes
+                        .get(&pane_tab_position)
+                        .into_iter()
+                        .flatten()
+                        .filter(|candidate| {
+                            candidate.is_plugin
+                                && candidate.is_floating
+                                && !candidate.is_suppressed
+                                && candidate.id < me
+                                && candidate.plugin_url.as_ref() == Some(plugin_url)
+                        })
+                        .map(|candidate| candidate.id)
+                        .min();
+                    if let Some(incumbent) = incumbent {
+                        self.closing_duplicate = true;
+                        focus_plugin_pane(incumbent, true, false);
+                        close_self();
+                        return false;
+                    }
+                }
+
+                // PaneManifest is authoritative about where this particular plugin
+                // instance was created. Use that position only to discover the stable
+                // tab id; subsequent tab switches or reordering cannot change owner.
+                if self.tab_id.is_none() {
+                    self.tab_position = Some(pane_tab_position);
+                    self.sync_owned_tab(&config);
+                }
                 if !self.minimized {
                     self.expanded = Some(Geometry {
                         x: pane.pane_x,
@@ -233,6 +267,38 @@ impl Modal {
             }
             _ => false,
         }
+    }
+
+    fn sync_owned_tab(&mut self, config: &Config) -> bool {
+        let target = match self.tab_id {
+            Some(tab_id) => self.tabs.iter().find(|tab| tab.tab_id == tab_id),
+            None => self
+                .tab_position
+                .and_then(|position| self.tabs.iter().find(|tab| tab.position == position)),
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        let tab_id = target.tab_id;
+        let tab_position = target.position;
+        let clean = strip_icon(&target.name, &config.icon).to_string();
+
+        self.tab_id = Some(tab_id);
+        self.tab_position = Some(tab_position);
+        if self.tab.as_deref() == Some(clean.as_str()) {
+            return false;
+        }
+
+        self.tab = Some(clean);
+        self.scroll = 0;
+        // Note-scoped state must not survive a tab rename. `content` included: while
+        // the new read is in flight it would otherwise answer `has_note()` about the
+        // previous name while `delete_note()` already targets the new one.
+        self.confirming_delete = false;
+        self.status = None;
+        self.content = None;
+        self.read_note();
+        true
     }
 
     fn read_note(&mut self) {

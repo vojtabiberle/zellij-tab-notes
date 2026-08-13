@@ -103,8 +103,13 @@ load_plugins {
 and, inside the `tab` keybinds block:
 
 ```kdl
-bind "a" { LaunchOrFocusPlugin "tab-notes" { floating true; move_to_focused_tab true; }; SwitchToMode "normal"; }
+bind "a" { LaunchPlugin "tab-notes" { floating true; }; SwitchToMode "normal"; }
 ```
+
+Each modal binds itself to the tab where Zellij creates it, so open/closed,
+minimised/expanded, geometry and scroll state stay independent between tabs. Reopening the
+shortcut in the same tab focuses its existing modal. Do not use `LaunchOrFocusPlugin` here:
+it is session-wide and would move one shared instance between tabs.
 
 ## Usage
 
@@ -131,19 +136,23 @@ Run once after any change to the watcher or the modal.
 7. Move a tab (`Alt i` / `Alt o`) → no note is moved, the icon stays.
 8. `d` then `y` in the modal → the note is deleted and the icon disappears.
 9. Two tabs with the same name → they share one note. Renaming a tab onto a name already taken leaves both note files intact and orphans the source file rather than overwriting.
-10. Delete confirmation state does not survive between tabs: arm delete with `d` on one tab, move the modal to another tab, and confirm `y` does nothing until `d` is pressed again.
-11. With three or more tabs, give a note to the *last* one → only that tab gains the icon,
+10. Open the modal in two tabs → both stay in their own tab. Minimise either one, switch
+    tabs, and verify the other keeps its own expanded/minimised state. Closing either modal
+    must not close the other one.
+11. Delete confirmation is isolated between tabs: arm delete with `d` in one modal, switch
+    to the other modal, and confirm `y` does nothing until `d` is pressed there.
+12. With three or more tabs, give a note to the *last* one → only that tab gains the icon,
     and the tab bar settles immediately (no flicker, no repeated renaming). This is what
     a position-based rename would break.
-12. `m` in the modal → it shrinks to a pinned box in the top-right corner, stays
+13. `m` in the modal → it shrinks to a pinned box in the top-right corner, stays
     readable, and stays on top while you move around other panes. `Ctrl t` `a` focuses
     it again and `m` restores the full size — the exact size and position it had, which
     the modal records from pane updates while it is expanded. While minimised the key
     hints appear only when the box has focus, since that is the only time those keys
     reach it.
-13. `f` in the modal → focus returns to the pane you were working in and the box stays
+14. `f` in the modal → focus returns to the pane you were working in and the box stays
     put, minimised and pinned if that is how you left it.
-14. Rename a tab to `feature/login` → the note file is `feature-login.md` and the tab shows
+15. Rename a tab to `feature/login` → the note file is `feature-login.md` and the tab shows
     the icon with its slash intact.
 
 ## Releasing
