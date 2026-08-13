@@ -7,5 +7,5 @@ members = ["core", "plugin"]
 # commit the bump back to main. Do not bump it by hand — the tag is the source of
 # truth and this line follows it.
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"

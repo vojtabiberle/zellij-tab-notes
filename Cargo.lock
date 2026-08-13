@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "tab-notes"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tab-notes-core",
  "zellij-tile",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "tab-notes-core"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tempfile"
