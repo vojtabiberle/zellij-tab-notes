@@ -13,6 +13,10 @@ pub const OP_READ: &str = "read";
 pub const OP_DELETE: &str = "delete";
 pub const OP_MOVE: &str = "move";
 pub const OP_CLEANUP: &str = "cleanup";
+pub const SESSION_KEY: &str = "tab_notes_session";
+pub const OP_MIGRATE: &str = "migrate_session";
+pub const SESSION_FAILED: &str = "tab-notes:session-failed";
+pub const SESSION_READY: &str = "tab-notes:session-ready";
 pub const OP_EDIT: &str = "edit";
 
 pub fn context(op: &str) -> BTreeMap<String, String> {
@@ -39,7 +43,7 @@ pub fn ensure_dir(dir: &Path) {
 }
 
 /// Lists the notes that exist AND are non-empty, in one command.
-pub fn list_notes(dir: &Path) {
+pub fn list_notes(dir: &Path, session: &str) {
     run_command(
         &[
             "find",
@@ -54,14 +58,14 @@ pub fn list_notes(dir: &Path) {
             "-size",
             "+0c",
         ],
-        context(OP_LIST),
+        session_context(OP_LIST, session),
     );
 }
 
 pub fn read_note(path: &Path) {
     run_command(
         &["head", "-c", "65536", &path.to_string_lossy()],
-        context(OP_READ),
+        context_with_tab(OP_READ, &path.to_string_lossy()),
     );
 }
 
@@ -94,5 +98,25 @@ pub fn delete_if_empty(path: &Path) {
             "-delete",
         ],
         context(OP_CLEANUP),
+    );
+}
+
+pub fn session_context(op: &str, session: &str) -> BTreeMap<String, String> {
+    let mut result = context(op);
+    result.insert(SESSION_KEY.to_string(), session.to_string());
+    result
+}
+
+pub fn migrate_session(from: &Path, to: &Path, session: &str) {
+    run_command(
+        &[
+            "sh",
+            "-c",
+            tab_notes_core::session::MIGRATE_NOTES,
+            "tab-notes-migrate",
+            &from.to_string_lossy(),
+            &to.to_string_lossy(),
+        ],
+        session_context(OP_MIGRATE, session),
     );
 }

@@ -52,7 +52,7 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         match self {
             State::Watcher(watcher) => watcher.pipe(pipe_message),
-            State::Modal(_) => false,
+            State::Modal(modal) => modal.pipe(pipe_message),
         }
     }
 

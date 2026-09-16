@@ -155,6 +155,33 @@ Run once after any change to the watcher or the modal.
 15. Rename a tab to `feature/login` → the note file is `feature-login.md` and the tab shows
     the icon with its slash intact.
 
+## Renaming sessions
+
+The watcher moves notes to the renamed session's directory before updating tab
+markers. A rename arriving during a move is queued until that move completes,
+and open note modals refresh after migration finishes. Modals wait for the watcher
+before allowing editing/deletion, including when opened during a move. Keep the watcher loaded for this to work.
+
+Existing destination notes are never overwritten: conflicting source files remain
+in the old directory, and the destination note is displayed. The old directory is
+kept, including unrelated files. Close/save editors before renaming a session:
+an editor holding the old pathname can still save there afterwards.
+
+Migration uses a fixed shell script with directories passed as separate arguments;
+names are never evaluated as shell code. Symlink directories are rejected, and
+symlink notes are not moved. Changing a name to one with the same sanitized path
+is a no-op. If migration fails, the source notes are retained and the failure is
+logged; check the notes directories, then reopen the note to retry.
+
+Regression checks (the live test requires Zellij 0.45+ and uses isolated temporary
+configuration, sockets and notes):
+
+```sh
+cargo test -p tab-notes-core
+cargo build -p tab-notes --release --target wasm32-wasip1
+python3 tests/session-rename.py target/wasm32-wasip1/release/tab-notes.wasm
+```
+
 ## Releasing
 
 CI runs formatting, clippy, the core tests and the wasm build on every push and pull

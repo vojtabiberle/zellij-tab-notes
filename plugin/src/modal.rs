@@ -41,6 +41,7 @@ const MINIMIZED: Geometry = Geometry {
 pub struct Modal {
     config: Result<Config, String>,
     session: Option<String>,
+    waiting_for_migration: bool,
     /// Stable ownership discovered from this pane's position in `PaneManifest`.
     /// Once assigned, a modal must never follow whichever other tab becomes active.
     tab_id: Option<usize>,
@@ -67,6 +68,7 @@ impl Modal {
         Self {
             config,
             session: None,
+            waiting_for_migration: false,
             tab_id: None,
             tabs: Vec::new(),
             tab: None,
@@ -108,6 +110,7 @@ impl Modal {
                     return false;
                 };
                 if self.session.as_deref() != Some(current.name.as_str()) {
+                    self.waiting_for_migration = true;
                     self.session = Some(current.name.clone());
                     // Note-scoped state must not survive a change of which note is
                     // shown. `content` included: while the new read is in flight it
@@ -116,7 +119,7 @@ impl Modal {
                     self.confirming_delete = false;
                     self.status = None;
                     self.content = None;
-                    self.read_note();
+                    Self::send_to_watcher("tab-notes:notes-changed", None);
                 }
                 true
             }
@@ -127,6 +130,20 @@ impl Modal {
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 match fs_ops::op_of(&context) {
                     Some(fs_ops::OP_READ) => {
+                        let expected =
+                            self.session
+                                .as_ref()
+                                .zip(self.tab.as_ref())
+                                .map(|(session, tab)| {
+                                    note_path(&config.notes_dir, session, tab)
+                                        .to_string_lossy()
+                                        .into_owned()
+                                });
+                        if self.waiting_for_migration
+                            || context.get(fs_ops::TAB_KEY) != expected.as_ref()
+                        {
+                            return false;
+                        }
                         self.content = if exit_code == Some(0) {
                             Some(String::from_utf8_lossy(&stdout).to_string())
                         } else {
@@ -257,6 +274,10 @@ impl Modal {
                 changed
             }
             Event::Key(key) => self.on_key(key),
+            Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                Self::send_to_watcher("tab-notes:notes-changed", None);
+                false
+            }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 self.config = Err(
                     "tab-notes: permissions denied — close this pane, reload the plugin \
@@ -267,6 +288,24 @@ impl Modal {
             }
             _ => false,
         }
+    }
+
+    pub fn pipe(&mut self, message: PipeMessage) -> bool {
+        if message.name == fs_ops::SESSION_READY
+            && message.payload.as_ref() == self.session.as_ref()
+        {
+            self.waiting_for_migration = false;
+            self.status = None;
+            self.read_note();
+            return true;
+        }
+        if message.name == fs_ops::SESSION_FAILED
+            && message.payload.as_ref() == self.session.as_ref()
+        {
+            self.status = Some("migration failed — check log; reopen note to retry".to_string());
+            return true;
+        }
+        false
     }
 
     fn sync_owned_tab(&mut self, config: &Config) -> bool {
@@ -302,6 +341,9 @@ impl Modal {
     }
 
     fn read_note(&mut self) {
+        if self.waiting_for_migration {
+            return;
+        }
         let (Ok(config), Some(session), Some(tab)) = (
             self.config.as_ref(),
             self.session.as_ref(),
@@ -353,6 +395,11 @@ impl Modal {
     }
 
     fn on_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.waiting_for_migration && matches!(key.bare_key, BareKey::Char('e' | 'd' | 'y')) {
+            self.status
+                .get_or_insert_with(|| "waiting for the notes watcher…".to_string());
+            return true;
+        }
         match key.bare_key {
             BareKey::Esc | BareKey::Char('q') => {
                 close_self();
@@ -433,7 +480,7 @@ impl Modal {
     /// `SessionUpdate` delivered to plugins, so an id-addressed message had nowhere to go and
     /// the modal closed doing nothing. A `MessageToPlugin` carrying neither a url nor a
     /// destination id is routed to all plugin ids, headless ones included. Other plugins
-    /// ignore a pipe name they do not know, and the modal ignores pipes entirely, so only the
+    /// ignore a pipe name they do not know, and the modal ignores notes-changed, so only the
     /// watcher acts on it. Names are prefixed because every plugin now sees them.
     fn send_to_watcher(name: &str, payload: Option<String>) {
         let mut message = MessageToPlugin::new(name);
