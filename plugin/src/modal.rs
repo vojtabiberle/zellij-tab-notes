@@ -292,7 +292,12 @@ impl Modal {
 
     pub fn pipe(&mut self, message: PipeMessage) -> bool {
         if message.name == fs_ops::SESSION_READY
-            && message.payload.as_ref() == self.session.as_ref()
+            && message
+                .args
+                .get(fs_ops::TAB_KEY)
+                .and_then(|id| id.parse::<usize>().ok())
+                == self.tab_id
+            && message.payload.as_ref() == self.current_note_path().as_ref()
         {
             self.waiting_for_migration = false;
             self.status = None;
@@ -302,7 +307,12 @@ impl Modal {
         if message.name == fs_ops::SESSION_FAILED
             && message.payload.as_ref() == self.session.as_ref()
         {
-            self.status = Some("migration failed — check log; reopen note to retry".to_string());
+            self.waiting_for_migration = true;
+            self.content = None;
+            self.status = Some(
+                "session notes conflict or move failed — choose another session name; see log"
+                    .to_string(),
+            );
             return true;
         }
         false
@@ -336,8 +346,22 @@ impl Modal {
         self.confirming_delete = false;
         self.status = None;
         self.content = None;
-        self.read_note();
+        self.waiting_for_migration = true;
+        Self::send_to_watcher("tab-notes:notes-changed", None);
         true
+    }
+
+    fn current_note_path(&self) -> Option<String> {
+        let config = self.config.as_ref().ok()?;
+        Some(
+            note_path(
+                &config.notes_dir,
+                self.session.as_ref()?,
+                self.tab.as_ref()?,
+            )
+            .to_string_lossy()
+            .into_owned(),
+        )
     }
 
     fn read_note(&mut self) {
@@ -498,8 +522,7 @@ impl Modal {
         ) else {
             return;
         };
-        // The modal performs its own destructive operation so that deleting still works
-        // when no watcher is loaded; the watcher is only told to refresh the icon.
+        // The modal owns deletion and reports its result to the watcher.
         // Everything the user is told about the outcome happens in the OP_DELETE arm
         // of `update`, once the command has actually reported an exit code.
         fs_ops::delete_note(&note_path(&config.notes_dir, session, tab));

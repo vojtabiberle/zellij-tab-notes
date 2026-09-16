@@ -94,11 +94,18 @@ load_plugins {{ tab-notes-watcher; }}
         screen.clear()
         action("rename-session", "target")
         session = "target"
+        wait_for(lambda: b"session notes conflict" in screen, "session collision reported")
+        assert (notes / "scratch" / "review.md").read_text() == "REVIEW_CONTEXT_8444\n"
+        assert (notes / "scratch" / "collision.md").read_text() == "source\n"
+        assert not (notes / "target" / "review.md").exists()
+        screen.clear()
+        action("rename-session", "review-task")
+        session = "review-task"
         wait_for(lambda: (notes / session / "review.md").exists(), "note migrated")
         wait_for(lambda: b"REVIEW_CONTEXT_8444" in screen, "open modal refreshed")
         assert (notes / session / "review.md").read_text() == "REVIEW_CONTEXT_8444\n"
         assert not (notes / "scratch" / "review.md").exists()
-        assert (notes / "scratch" / "collision.md").read_text() == "source\n"
+        assert (notes / session / "collision.md").read_text() == "source\n"
         assert (notes / "target" / "collision.md").read_text() == "destination\n"
         assert "📝" in action("list-tabs", "--json")
         # Consecutive renames exercise the watcher's asynchronous migration queue.
@@ -107,9 +114,30 @@ load_plugins {{ tab-notes-watcher; }}
             session = name
         wait_for(lambda: (notes / "final" / "review.md").exists(), "consecutive renames")
         assert (notes / "final" / "review.md").read_text() == "REVIEW_CONTEXT_8444\n"
-        print("PASS: startup, modal refresh, session renames, collision preservation")
+        # Same display name gets a persistent suffix, never the first tab's note.
+        action("new-tab", "--name", "review")
+        wait_for(lambda: "review (2)" in action("list-tabs", "--json"), "duplicate tab renamed")
+        (notes / "final" / "review (2).md").write_text("SECOND_TAB_CONTEXT\n")
+        action("pipe", "--name", "tab-notes:notes-changed", "refresh")
+        screen.clear()
+        action("launch-plugin", "--floating", "--configuration", f"role=modal,notes_dir={notes}", url)
+        wait_for(lambda: b"SECOND_TAB_CONTEXT" in screen, "duplicate tab owns a separate note")
+        assert b"REVIEW_CONTEXT_8444" not in screen
+        third_id = action("new-tab", "--name", "other").strip()
+        (notes / "final" / "other.md").write_text("THIRD_TAB_CONTEXT\n")
+        action("pipe", "--name", "tab-notes:notes-changed", "refresh")
+        wait_for(lambda: "📝 other" in action("list-tabs", "--json"), "third note indexed")
+        action("rename-tab-by-id", third_id, "review")
+        wait_for(lambda: (notes / "final" / "review (3).md").exists(), "incoming rename disambiguated")
+        assert (notes / "final" / "review (3).md").read_text() == "THIRD_TAB_CONTEXT\n"
+        assert (notes / "final" / "review (2).md").read_text() == "SECOND_TAB_CONTEXT\n"
+        assert (notes / "final" / "review.md").read_text() == "REVIEW_CONTEXT_8444\n"
+        action("new-tab", "--name", "feature/login")
+        action("new-tab", "--name", "feature-login")
+        wait_for(lambda: "feature-login (2)" in action("list-tabs", "--json"), "sanitized collision")
+        print("PASS: session conflict refusal/recovery, modal refresh, duplicate tabs, incoming rename, sanitized names")
     finally:
-        for name in ("scratch", "target", "intermediate", "final"):
+        for name in ("scratch", "target", "review-task", "intermediate", "final"):
             subprocess.run(["zellij", "delete-session", "--force", name], env=env,
                            capture_output=True, timeout=10)
         if client is not None:

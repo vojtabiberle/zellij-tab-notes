@@ -19,7 +19,7 @@ pub enum Action {
     /// Move a note file because its tab was renamed. Both values are **note keys**
     /// (`sanitize_tab_name` applied to a clean tab name), not display names, so they
     /// must be turned into paths with `note_path_from_key`.
-    MoveNote { from: String, to: String },
+    MoveNote { id: usize, from: String, to: String },
 }
 
 /// Keeps tab names in sync with the set of tabs that have notes.
@@ -52,23 +52,76 @@ impl Reconciler {
         }
     }
 
+    /// A failed no-clobber move must retain its original owner for the retry.
+    pub fn restore_note_key(&mut self, id: usize, key: String) {
+        self.known.insert(id, key);
+    }
+
     pub fn reconcile(&mut self, tabs: &[TabView], notes: &mut BTreeSet<String>) -> Vec<Action> {
+        self.reconcile_with_occupied(tabs, notes, &notes.clone())
+    }
+
+    pub fn reconcile_with_occupied(
+        &mut self,
+        tabs: &[TabView],
+        notes: &mut BTreeSet<String>,
+        occupied: &BTreeSet<String>,
+    ) -> Vec<Action> {
+        // Resolve ownership before moving anything. Established owners win over
+        // incoming renames; stable IDs break ties independently of display order.
+        let mut ordered: Vec<_> = tabs.iter().collect();
+        ordered.sort_by_key(|tab| {
+            let key = sanitize_tab_name(strip_icon(&tab.name, &self.icon));
+            (self.known.get(&tab.id) != Some(&key), tab.id)
+        });
+        let mut reserved = occupied.clone();
+        reserved.extend(self.known.values().cloned());
+        reserved.extend(
+            tabs.iter()
+                .map(|t| sanitize_tab_name(strip_icon(&t.name, &self.icon))),
+        );
+        let mut used = BTreeSet::new();
         let mut actions = Vec::new();
+        for tab in ordered {
+            let clean = strip_icon(&tab.name, &self.icon);
+            let key = sanitize_tab_name(clean);
+            let incoming = self.known.get(&tab.id).is_some_and(|old| old != &key);
+            if used.contains(&key) || (incoming && occupied.contains(&key)) {
+                // Leave room for the suffix, including with multibyte/long names.
+                let mut end = clean.len().min(180);
+                while !clean.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let base = clean[..end].trim_end();
+                let mut n = 2;
+                let name = loop {
+                    let candidate = format!("{base} ({n})");
+                    if reserved.insert(sanitize_tab_name(&candidate)) {
+                        break candidate;
+                    }
+                    n += 1;
+                };
+                used.insert(sanitize_tab_name(&name));
+                actions.push(Action::RenameTab { id: tab.id, name });
+            } else {
+                used.insert(key);
+            }
+        }
+        if !actions.is_empty() {
+            return actions;
+        }
 
         for tab in tabs {
             let clean = strip_icon(&tab.name, &self.icon).to_string();
             let key = sanitize_tab_name(&clean);
 
             if let Some(previous) = self.known.get(&tab.id) {
-                // Never move a note onto a key that already has one — that would
-                // silently destroy the destination's content, whether it belongs to
-                // another open tab or is an orphan left by a closed one. Colliding
-                // names degrade to sharing, which the design accepts; losing a note
-                // is not.
+                // Collision resolution above has reserved a distinct destination.
                 if previous != &key && notes.contains(previous) && !notes.contains(&key) {
                     notes.remove(previous);
                     notes.insert(key.clone());
                     actions.push(Action::MoveNote {
+                        id: tab.id,
                         from: previous.clone(),
                         to: key.clone(),
                     });
@@ -166,6 +219,7 @@ mod tests {
             actions,
             vec![
                 Action::MoveNote {
+                    id: 7,
                     from: "old".to_string(),
                     to: "new".to_string()
                 },
@@ -187,6 +241,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![Action::MoveNote {
+                id: 7,
                 from: "old".to_string(),
                 to: "new".to_string()
             }],
@@ -318,6 +373,7 @@ mod tests {
             actions,
             vec![
                 Action::MoveNote {
+                    id: 7,
                     from: "old".to_string(),
                     to: "feature-login".to_string()
                 },
@@ -328,5 +384,112 @@ mod tests {
             ]
         );
         assert_eq!(n, notes(&["feature-login"]));
+    }
+    #[test]
+    fn duplicate_names_get_distinct_persistent_names_before_reading() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&["review"]);
+        assert_eq!(
+            r.reconcile(&[tab(2, "review"), tab(1, "review")], &mut n),
+            vec![Action::RenameTab {
+                id: 2,
+                name: "review (2)".into()
+            }]
+        );
+        let actions = r.reconcile(&[tab(2, "review (2)"), tab(1, "review")], &mut n);
+        assert_eq!(
+            actions,
+            vec![Action::RenameTab {
+                id: 1,
+                name: "📝 review".into()
+            }]
+        );
+        assert_eq!(n, notes(&["review"]));
+    }
+
+    #[test]
+    fn incoming_rename_keeps_its_own_note_and_does_not_steal_owner() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&["mine", "review"]);
+        r.reconcile(&[tab(1, "mine"), tab(2, "review")], &mut n);
+        assert_eq!(
+            r.reconcile(&[tab(1, "review"), tab(2, "📝 review")], &mut n),
+            vec![Action::RenameTab {
+                id: 1,
+                name: "review (2)".into()
+            }]
+        );
+        let actions = r.reconcile(&[tab(1, "review (2)"), tab(2, "📝 review")], &mut n);
+        assert!(actions.contains(&Action::MoveNote {
+            id: 1,
+            from: "mine".into(),
+            to: "review (2)".into()
+        }));
+        assert_eq!(n, notes(&["review", "review (2)"]));
+    }
+
+    #[test]
+    fn sanitization_collisions_are_disambiguated_too() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&[]);
+        assert_eq!(
+            r.reconcile(&[tab(1, "feature/login"), tab(2, "feature-login")], &mut n),
+            vec![Action::RenameTab {
+                id: 2,
+                name: "feature-login (2)".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn suffix_reserves_empty_files_and_other_tabs_names() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&["old"]);
+        r.reconcile(&[tab(1, "old")], &mut n);
+        let occupied = notes(&["old", "new", "new (2)"]);
+        assert_eq!(
+            r.reconcile_with_occupied(&[tab(1, "new"), tab(2, "new (3)")], &mut n, &occupied),
+            vec![Action::RenameTab {
+                id: 1,
+                name: "new (4)".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn long_names_leave_room_for_a_suffix_instead_of_looping() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&[]);
+        let long = "é".repeat(210);
+        let actions = r.reconcile(&[tab(1, &long), tab(2, &long)], &mut n);
+        let Action::RenameTab { name, .. } = &actions[0] else {
+            panic!()
+        };
+        assert!(name.ends_with(" (2)"));
+        assert!(name.len() < 200);
+        assert_ne!(sanitize_tab_name(name), sanitize_tab_name(&long));
+    }
+
+    #[test]
+    fn failed_move_retries_original_note_under_a_free_name() {
+        let mut r = Reconciler::new(ICON);
+        let mut n = notes(&["old"]);
+        r.reconcile(&[tab(1, "old")], &mut n);
+        r.reconcile(&[tab(1, "new")], &mut n);
+        r.restore_note_key(1, "old".into());
+        n = notes(&["old", "new"]); // concurrent destination creation
+        assert_eq!(
+            r.reconcile(&[tab(1, "new")], &mut n),
+            vec![Action::RenameTab {
+                id: 1,
+                name: "new (2)".into()
+            }]
+        );
+        let actions = r.reconcile(&[tab(1, "new (2)")], &mut n);
+        assert!(actions.contains(&Action::MoveNote {
+            id: 1,
+            from: "old".into(),
+            to: "new (2)".into()
+        }));
     }
 }

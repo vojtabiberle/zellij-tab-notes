@@ -1,17 +1,26 @@
 /// A fixed script: directory names are positional arguments, never shell source.
-/// Merge only regular notes and never overwrite a destination. Keep the source
-/// directory (and any collisions) so an editor still using its old path can save.
+/// Refuse a destination containing notes before moving anything. Keep the source
+/// directory so an editor still using its old path can save.
 pub const MIGRATE_NOTES: &str = r#"
 set -eu
 [ "$1" != "$2" ] || exit 0
 [ ! -L "$1" ] && [ ! -L "$2" ] || exit 1
 mkdir -p "$2"
+# Any destination note could be adopted by a tab with no source note.
+# Refuse the entire occupied namespace, including empty files and symlinks.
+for target in "$2"/*.md; do
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        printf '%s\n' 'Destination contains notes; choose a different session name.' >&2
+        exit 1
+    fi
+done
 [ -d "$1" ] || exit 0
 for note in "$1"/*.md; do
     [ -f "$note" ] && [ ! -L "$note" ] || continue
     target="$2/${note##*/}"
-    [ ! -e "$target" ] && [ ! -L "$target" ] || continue
+    [ ! -e "$target" ] && [ ! -L "$target" ] || exit 1
     mv -n "$note" "$2/"
+    [ ! -e "$note" ] || exit 1
 done
 "#;
 
@@ -74,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_without_overwriting_or_deleting_collisions() {
+    fn refuses_occupied_destination_before_moving_any_note() {
         let n = Notes::new();
         for dir in ["old", "new"] {
             fs::create_dir(n.0.join(dir)).unwrap();
@@ -83,7 +92,7 @@ mod tests {
         fs::write(n.0.join("new/shared.md"), "destination").unwrap();
         fs::write(n.0.join("old/unique.md"), "keep").unwrap();
         fs::write(n.0.join("old/empty.md"), "").unwrap();
-        assert!(n.migrate("old", "new"));
+        assert!(!n.migrate("old", "new"));
         assert_eq!(
             fs::read_to_string(n.0.join("old/shared.md")).unwrap(),
             "source"
@@ -92,8 +101,8 @@ mod tests {
             fs::read_to_string(n.0.join("new/shared.md")).unwrap(),
             "destination"
         );
-        assert!(n.0.join("new/unique.md").is_file());
-        assert!(n.0.join("new/empty.md").is_file());
+        assert!(n.0.join("old/unique.md").is_file());
+        assert!(n.0.join("old/empty.md").is_file());
     }
 
     #[test]
@@ -131,7 +140,7 @@ mod tests {
         std::os::unix::fs::symlink(n.0.join("outside"), n.0.join("old/link.md")).unwrap();
         fs::write(n.0.join("old/shared.md"), "keep").unwrap();
         std::os::unix::fs::symlink(n.0.join("absent"), n.0.join("new/shared.md")).unwrap();
-        assert!(n.migrate("old", "new"));
+        assert!(!n.migrate("old", "new"));
         assert!(n.0.join("old/shared.md").is_file());
         assert!(n.0.join("old/link.md").is_symlink());
         assert_eq!(

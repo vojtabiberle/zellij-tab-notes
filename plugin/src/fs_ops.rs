@@ -42,21 +42,26 @@ pub fn ensure_dir(dir: &Path) {
     );
 }
 
-/// Lists the notes that exist AND are non-empty, in one command.
+/// Inventory includes empty files, symlinks and directories as reserved names;
+/// only non-empty regular files count as notes for the tab marker.
 pub fn list_notes(dir: &Path, session: &str) {
     run_command(
         &[
-            "find",
+            "sh",
+            "-c",
+            r#"
+set -eu
+[ -d "$1" ]
+for note in "$1"/*.md; do
+    [ -e "$note" ] || [ -L "$note" ] || continue
+    printf 'P%s\n' "$note"
+    if [ -f "$note" ] && [ ! -L "$note" ] && [ -s "$note" ]; then
+        printf 'N%s\n' "$note"
+    fi
+done
+"#,
+            "tab-notes-list",
             &dir.to_string_lossy(),
-            "-maxdepth",
-            "1",
-            // `-type f` so a directory called `something.md` is never read as a note.
-            "-type",
-            "f",
-            "-name",
-            "*.md",
-            "-size",
-            "+0c",
         ],
         session_context(OP_LIST, session),
     );
@@ -73,15 +78,25 @@ pub fn delete_note(path: &Path) {
     run_command(&["rm", "-f", &path.to_string_lossy()], context(OP_DELETE));
 }
 
-/// `-n`, never `-f`: the reconciler's collision guard is an in-memory check against a
-/// listing that can be stale (a note written by an editor that has not exited yet is
-/// not in it), so the filesystem, not the cache, has the last word on overwriting. A
-/// refused move is benign — the chained refresh re-lists and settles into the
-/// documented "collision degrades to sharing, source orphaned" behaviour.
-pub fn move_note(from: &Path, to: &Path) {
+/// Keep the original owner if a destination appeared after the last listing.
+pub fn move_note(from: &Path, to: &Path, id: usize, from_key: &str) {
+    let mut context = context_with_tab(OP_MOVE, &id.to_string());
+    context.insert("from_key".to_string(), from_key.to_string());
     run_command(
-        &["mv", "-n", &from.to_string_lossy(), &to.to_string_lossy()],
-        context(OP_MOVE),
+        &[
+            "sh",
+            "-c",
+            r#"
+set -eu
+[ ! -e "$2" ] && [ ! -L "$2" ] || exit 17
+mv -n "$1" "$2"
+[ ! -e "$1" ] && [ ! -L "$1" ] || exit 17
+"#,
+            "tab-notes-move",
+            &from.to_string_lossy(),
+            &to.to_string_lossy(),
+        ],
+        context,
     );
 }
 

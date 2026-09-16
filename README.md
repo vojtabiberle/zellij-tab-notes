@@ -135,7 +135,7 @@ Run once after any change to the watcher or the modal.
 6. Rename a tab that has a note → the note file is renamed with it, the icon stays.
 7. Move a tab (`Alt i` / `Alt o`) → no note is moved, the icon stays.
 8. `d` then `y` in the modal → the note is deleted and the icon disappears.
-9. Two tabs with the same name → they share one note. Renaming a tab onto a name already taken leaves both note files intact and orphans the source file rather than overwriting.
+9. Two tabs with the same name → the incoming tab becomes `name (2)` and owns a separate note. Renaming a tab onto an occupied name carries its original note to a free suffixed name.
 10. Open the modal in two tabs → both stay in their own tab. Minimise either one, switch
     tabs, and verify the other keeps its own expanded/minimised state. Closing either modal
     must not close the other one.
@@ -162,16 +162,36 @@ markers. A rename arriving during a move is queued until that move completes,
 and open note modals refresh after migration finishes. Modals wait for the watcher
 before allowing editing/deletion, including when opened during a move. Keep the watcher loaded for this to work.
 
-Existing destination notes are never overwritten: conflicting source files remain
-in the old directory, and the destination note is displayed. The old directory is
-kept, including unrelated files. Close/save editors before renaming a session:
+A destination directory containing any `.md` entries is refused before moving
+anything: the modal reports the conflict and stays blocked instead of showing
+another task's notes. Choose another session name to retry. Two live sessions
+whose names sanitize to the same directory are blocked too. Old directories and
+unrelated files remain intact. Close/save editors before renaming a session or tab:
 an editor holding the old pathname can still save there afterwards.
 
 Migration uses a fixed shell script with directories passed as separate arguments;
 names are never evaluated as shell code. Symlink directories are rejected, and
-symlink notes are not moved. Changing a name to one with the same sanitized path
-is a no-op. If migration fails, the source notes are retained and the failure is
-logged; check the notes directories, then reopen the note to retry.
+symlink notes are not moved. Renaming the same session within its own sanitized
+path is a no-op. I/O failures are logged and keep editing blocked until recovery.
+
+## Preventing tab-note collisions
+
+The watcher gives conflicting tabs distinct persistent display names: `review`,
+`review (2)`, `review (3)`. Existing owners keep their names; stable tab IDs break
+startup ties, so moving tabs does not change ownership. This also handles different
+names that sanitize to the same filename, such as `feature/login` and `feature-login`.
+Suffixes reserve existing tabs and files, including empty files and symlinks.
+
+An incoming rename keeps its own note instead of adopting an occupied destination.
+A file appearing between listing and moving causes a no-clobber failure, after
+which the watcher re-lists and selects a free name. Modals wait for the watcher to
+confirm their specific tab and note path before reading, editing or deleting.
+
+No format migration is needed: notes remain `<session>/<tab>.md`, and suffixed tab
+names survive normal session restoration. Previously shared notes cannot be split
+automatically: at startup, the lowest-ID duplicate retains the original file and
+the others receive empty, separate note slots. Historical session names that map
+to the same legacy directory cannot be retrospectively distinguished either.
 
 Regression checks (the live test requires Zellij 0.45+ and uses isolated temporary
 configuration, sockets and notes):
